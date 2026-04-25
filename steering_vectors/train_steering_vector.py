@@ -1,6 +1,7 @@
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 from torch import Tensor, nn
@@ -21,6 +22,9 @@ class SteeringVectorTrainingSample:
     negative_str: str
     read_positive_token_index: int | None = None
     read_negative_token_index: int | None = None
+
+
+TrainingActivationMode = Literal["auto", "stream", "materialize"]
 
 
 @torch.no_grad()
@@ -155,6 +159,87 @@ def aggregate_activations(
         layer_activations[layer_num] = direction_vec
     return layer_activations
 
+@torch.no_grad()
+def _train_mean_steering_vector(
+    model: nn.Module,
+    tokenizer: PreTrainedTokenizerBase,
+    training_samples: Sequence[SteeringVectorTrainingSample | tuple[str, str]],
+    layers: list[int] | None,
+    layer_type: LayerType,
+    layer_config: ModelLayerConfig | None,
+    read_token_index: int | Callable[[str], int],
+    show_progress: bool,
+    batch_size: int,
+    tqdm_desc: str,
+) -> SteeringVector:
+    fix_pad_token(tokenizer)
+    layer_config = guess_and_enhance_layer_config(model, layer_config, layer_type)
+    running_sums: dict[int, Tensor] = {}
+    total_samples = 0
+
+    for raw_batch in batchify(
+        training_samples,
+        batch_size=batch_size,
+        show_progress=show_progress,
+        tqdm_desc=tqdm_desc,
+    ):
+        batch = _formalize_batch(raw_batch)
+        pos_indices = []
+        neg_indices = []
+        pos_prompts = []
+        neg_prompts = []
+        for training_sample in batch:
+            pos_prompts.append(training_sample.positive_str)
+            pos_indices.append(
+                _get_token_index(
+                    training_sample.read_positive_token_index,
+                    read_token_index,
+                    training_sample.positive_str,
+                )
+            )
+            neg_prompts.append(training_sample.negative_str)
+            neg_indices.append(
+                _get_token_index(
+                    training_sample.read_negative_token_index,
+                    read_token_index,
+                    training_sample.negative_str,
+                )
+            )
+
+        pos_acts = _extract_activations(
+            model,
+            tokenizer,
+            pos_prompts,
+            layer_type=layer_type,
+            layer_config=layer_config,
+            layers=layers,
+            read_token_indices=pos_indices,
+        )
+        neg_acts = _extract_activations(
+            model,
+            tokenizer,
+            neg_prompts,
+            layer_type=layer_type,
+            layer_config=layer_config,
+            layers=layers,
+            read_token_indices=neg_indices,
+        )
+
+        batch_len = len(batch)
+        total_samples += batch_len
+        for layer_num, pos_act in pos_acts.items():
+            delta_sum = (pos_act - neg_acts[layer_num]).sum(dim=0).cpu()
+            if layer_num in running_sums:
+                running_sums[layer_num] += delta_sum
+            else:
+                running_sums[layer_num] = delta_sum
+
+    layer_activations = {
+        layer_num: layer_sum / total_samples
+        for layer_num, layer_sum in running_sums.items()
+    }
+    return SteeringVector(layer_activations, layer_type)
+
 
 @torch.no_grad()
 def train_steering_vector(
@@ -168,6 +253,7 @@ def train_steering_vector(
     read_token_index: int | Callable[[str], int] = -1,
     show_progress: bool = False,
     aggregator: Aggregator = mean_aggregator(),
+    activation_mode: TrainingActivationMode = "auto",
     batch_size: int = 1,
     tqdm_desc: str = "Training steering vector",
 ) -> SteeringVector:
@@ -191,7 +277,40 @@ def train_steering_vector(
         show_progress: If True, show a progress bar. Default False.
         aggregator: A function that takes the positive and negative activations for a
             layer and returns a single vector. Default is mean_aggregator.
+            The built-in mean aggregator is streamed batch-by-batch and does not
+            retain the full activation dataset in memory.
+        activation_mode: Controls whether activations are streamed batch-by-batch,
+            fully materialized before aggregation, or selected automatically.
+            ``"auto"`` uses streaming only when the aggregator supports it.
     """
+    if activation_mode not in ("auto", "stream", "materialize"):
+        raise ValueError(
+            "activation_mode must be one of 'auto', 'stream', or 'materialize'"
+        )
+
+    use_streaming = False
+    if activation_mode == "stream":
+        if not getattr(aggregator, "streaming", False):
+            raise ValueError(
+                "activation_mode='stream' requires an aggregator with streaming=True"
+            )
+        use_streaming = True
+    elif activation_mode == "auto":
+        use_streaming = bool(getattr(aggregator, "streaming", False))
+
+    if use_streaming:
+        return _train_mean_steering_vector(
+            model,
+            tokenizer,
+            training_samples,
+            layers=layers,
+            layer_type=layer_type,
+            layer_config=layer_config,
+            read_token_index=read_token_index,
+            show_progress=show_progress,
+            batch_size=batch_size,
+            tqdm_desc=tqdm_desc,
+        )
     pos_acts, neg_acts = extract_activations(
         model,
         tokenizer,

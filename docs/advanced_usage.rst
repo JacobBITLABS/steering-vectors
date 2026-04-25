@@ -69,6 +69,23 @@ If you need different behavior, for example PCA, you can pass a custom function 
 when calling ``train_steering_vector()``. This function takes 2 arguments, ``pos_activations`` and ``neg_activations``,
 each of shape ``(num_samples, hidden_dim)``, and returns a 1-d tensor of shape ``(hidden_dim,)``. This is demonstrated below:
 
+The built-in mean aggregator is handled specially and is reduced online batch-by-batch,
+which avoids storing the full activation dataset in memory. Custom aggregators still
+receive the full activation tensors for each layer; for large datasets, set
+``move_to_cpu=True`` if you need to offload those tensors from GPU memory to host RAM.
+
+You can control this explicitly with the ``activation_mode`` argument to
+``train_steering_vector()``:
+
+.. code-block:: python
+
+    vec = train_steering_vector(model, tokenizer, data, activation_mode="auto")
+    vec = train_steering_vector(model, tokenizer, data, activation_mode="stream")
+    vec = train_steering_vector(model, tokenizer, data, activation_mode="materialize")
+
+``"stream"`` is currently only supported for aggregators that implement streaming
+reduction, such as the built-in mean aggregator.
+
 .. code-block:: python
 
     def norm_mean_aggregator(pos_activations, neg_activations):

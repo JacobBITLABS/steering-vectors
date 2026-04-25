@@ -208,6 +208,64 @@ def test_train_steering_vector_batching_gives_identical_result_to_unbatched(
         )
 
 
+def test_train_steering_vector_activation_mode_materialize_matches_streaming(
+    model: GPT2LMHeadModel, tokenizer: PreTrainedTokenizer
+) -> None:
+    training_data = [
+        (
+            "This is a short positive example.",
+            "This is a short negative example with different token length.",
+        ),
+        (
+            "Dummy text. This is a much longer positive example.",
+            "Dummy text. This is a much longer negative example with different token length.",
+        ),
+    ]
+
+    steering_vector_stream = train_steering_vector(
+        model,
+        tokenizer,
+        training_data,
+        layers=[2, 3, 4],
+        activation_mode="stream",
+    )
+    steering_vector_materialized = train_steering_vector(
+        model,
+        tokenizer,
+        training_data,
+        layers=[2, 3, 4],
+        activation_mode="materialize",
+    )
+
+    for layer in steering_vector_stream.layer_activations.keys():
+        assert torch.allclose(
+            steering_vector_stream.layer_activations[layer],
+            steering_vector_materialized.layer_activations[layer],
+            atol=1e-5,
+        )
+
+
+def test_train_steering_vector_stream_mode_rejects_non_streaming_aggregator(
+    model: GPT2LMHeadModel, tokenizer: PreTrainedTokenizer
+) -> None:
+    training_data = [
+        (
+            "This is a short positive example.",
+            "This is a short negative example with different token length.",
+        )
+    ]
+
+    with pytest.raises(ValueError, match="streaming=True"):
+        train_steering_vector(
+            model,
+            tokenizer,
+            training_data,
+            layers=[2, 3, 4],
+            aggregator=lambda pos, neg: (pos - neg).mean(dim=0),
+            activation_mode="stream",
+        )
+
+
 def test_train_steering_vector_matches_original_caa(
     empty_llama_model: LlamaForCausalLM, llama_tokenizer: PreTrainedTokenizer
 ) -> None:

@@ -86,6 +86,16 @@ setting the ``batch_size`` argument:
         batch_size=8,
     )
 
+When using the default mean aggregator, training is streamed batch-by-batch, so
+the library does not keep every activation tensor for the whole dataset in GPU
+memory. Increasing ``batch_size`` still increases peak activation memory for
+each forward pass.
+
+If you want to override that behavior, pass ``activation_mode`` to
+``train_steering_vector()``. Use ``"stream"`` to force the running-mean path,
+``"materialize"`` to keep the legacy full-activation path, or ``"auto"``
+to let the library choose based on the aggregator.
+
 
 Magnitude scaling
 '''''''''''''''''

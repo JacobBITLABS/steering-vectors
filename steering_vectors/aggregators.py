@@ -28,22 +28,34 @@ def logistic_aggregator(sklearn_kwargs: dict[str, Any] | None = None) -> Aggrega
     return _logistic_aggregator
 
 
-def mean_aggregator() -> Aggregator:
+def mean_aggregator(streaming: bool = True) -> Aggregator:
     """
     The default aggregator, which computes the mean of the difference between the
     positive and negative activations.
+
+    Args:
+        streaming: If True (default), marks this aggregator as streaming-compatible
+            so ``train_steering_vector()`` will reduce activations batch-by-batch
+            instead of materialising the full dataset.
     """
 
     def _mean_aggregator(pos_acts: Tensor, neg_acts: Tensor) -> Tensor:
         return (pos_acts - neg_acts).mean(dim=0)
 
+    _mean_aggregator.streaming = streaming  # type: ignore[attr-defined]
     return _mean_aggregator
 
 
-def pca_aggregator() -> Aggregator:
+def pca_aggregator(streaming: bool = False) -> Aggregator:
     """
     An aggregator that uses PCA to calculate a steering vector. This will always
     have norm of 1.
+
+    Args:
+        streaming: If True, marks this aggregator as streaming-compatible so
+            ``train_steering_vector()`` will reduce activations batch-by-batch.
+            Defaults to False because PCA normally needs the full dataset; only
+            enable this if you understand the implications.
     """
 
     @torch.no_grad()
@@ -56,6 +68,7 @@ def pca_aggregator() -> Aggregator:
         sign = torch.sign(torch.mean(deltas @ vec))
         return sign * vec
 
+    _pca_aggregator.streaming = streaming  # type: ignore[attr-defined]
     return _pca_aggregator
 
 
